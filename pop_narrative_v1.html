@@ -1,0 +1,502 @@
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+#wrap{width:100%;padding:10px 0}
+#top{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+button{font-size:12px;padding:5px 12px;border:0.5px solid var(--color-border-secondary);border-radius:7px;background:var(--color-background-primary);color:var(--color-text-primary);cursor:pointer}
+button:hover{background:var(--color-background-secondary)}
+button:disabled{opacity:.35;cursor:default}
+#spd{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--color-text-secondary)}
+#phase-box{font-size:12px;font-weight:500;padding:4px 12px;border:0.5px solid var(--color-border-secondary);border-radius:7px;background:var(--color-background-secondary);color:var(--color-text-primary)}
+#bigscreen{display:flex;gap:14px;align-items:center;margin-bottom:8px;padding:7px 14px;border-radius:7px;background:#3C3489;color:#EEEDFE;font-size:12px;flex-wrap:wrap}
+#bigscreen .lbl{opacity:.65;font-size:11px}
+.sv{font-size:15px;font-weight:600;margin-left:3px}
+canvas{width:100%;border:0.5px solid var(--color-border-tertiary);border-radius:8px;display:block;background:#fff}
+#log{margin-top:8px;height:56px;overflow-y:auto;font-size:11px;color:var(--color-text-secondary);background:var(--color-background-secondary);border-radius:7px;padding:5px 10px;line-height:1.7}
+#log .s{display:block;font-style:italic}
+#log .o{display:block;color:#993C1D}
+#log .w{display:block;color:#0F6E56}
+#log .g{display:block;color:#854F0B}
+#log .p{display:block;color:#185FA5}
+</style>
+<div id="wrap">
+  <div id="top">
+    <button id="bplay">Start</button>
+    <button id="bpause" disabled>Pause</button>
+    <button id="breset">Reset</button>
+    <div id="spd">Speed<input type="range" id="rspd" min="1" max="5" value="2" step="1" style="width:76px"><span id="sval">2x</span></div>
+    <div id="phase-box">Phase: waiting</div>
+  </div>
+  <div id="bigscreen">
+    <span style="font-weight:500;font-size:11px">PUBLIC SCREEN</span>
+    <span><span class="lbl">Total entered</span><span class="sv" id="sc-tot">0</span></span>
+    <span><span class="lbl">Organizers</span><span class="sv" id="sc-org" style="color:#F0997B">0</span></span>
+    <span><span class="lbl">Witnesses</span><span class="sv" id="sc-wit" style="color:#9FE1CB">0</span></span>
+    <span><span class="lbl">Guards</span><span class="sv" id="sc-grd" style="color:#FAC775">0</span></span>
+    <span><span class="lbl">Participants</span><span class="sv" id="sc-par" style="color:#B5D4F4">0</span></span>
+  </div>
+  <canvas id="c" height="480"></canvas>
+  <div id="log"></div>
+</div>
+<script>
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const W=680,H=480;cv.width=W;cv.height=H;
+
+// ── CONFIG ──
+const TOTAL=30,NB=5; // 30 people, 5 booths
+const MIN_ORG=NB,MIN_WIT=NB,MIN_GRD=3;
+const RC={organizer:'#D85A30',witness:'#1D9E75',guard:'#BA7517',participant:'#378ADD',none:'#aaa'};
+const RD={organizer:'#993C1D',witness:'#0F6E56',guard:'#854F0B',participant:'#185FA5',none:'#777'};
+
+function rnd(a,b){return a+Math.random()*(b-a)}
+function dist(ax,ay,bx,by){return Math.sqrt((bx-ax)**2+(by-ay)**2)}
+
+function buildRoles(){
+  const r=[];
+  for(let i=0;i<MIN_ORG;i++)r.push('organizer');
+  for(let i=0;i<MIN_WIT;i++)r.push('witness');
+  for(let i=0;i<MIN_GRD;i++)r.push('guard');
+  while(r.length<TOTAL)r.push('participant');
+  for(let i=r.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[r[i],r[j]]=[r[j],r[i]];}
+  return r;
+}
+
+// ── LAYOUT CONSTANTS ──
+const HALL   ={x:40, y:48, w:600,h:72};
+const STA    ={x:285,y:132,w:110,h:34};
+const BX     =[40,178,316,454,544]; // booth x positions — adjusted to fit 5
+const BWID   =114;
+const BOOTH_Y=344;
+const BOOTH_H=48;
+const EXIT_Y =406;
+
+// corridor zones by role
+const CZONES={
+  organizer:  {x:40, y:182,w:112,h:38},
+  witness:    {x:162,y:182,w:112,h:38},
+  guard:      {x:406,y:182,w:112,h:38},
+  participant:{x:528,y:182,w:112,h:38},
+};
+
+// guard checkpoint positions
+const GPTS=[{x:156,y:200},{x:290,y:200},{x:522,y:200}];
+
+// ── SCREEN STATE ──
+const scr={tot:0,org:0,wit:0,grd:0,par:0};
+function updScreen(){
+  document.getElementById('sc-tot').textContent=scr.tot;
+  document.getElementById('sc-org').textContent=scr.org;
+  document.getElementById('sc-wit').textContent=scr.wit;
+  document.getElementById('sc-grd').textContent=scr.grd;
+  document.getElementById('sc-par').textContent=scr.par;
+}
+
+function setPhase(t){document.getElementById('phase-box').textContent='Phase: '+t;}
+function addLog(msg,cls){
+  const el=document.getElementById('log');
+  const s=document.createElement('span');s.className=cls||'s';s.textContent=msg;
+  el.appendChild(s);el.scrollTop=el.scrollHeight;
+}
+
+// ── PARTICLE ──
+// States: entering → in_hall → waiting(hall) → to_station → at_station → to_corridor → in_corridor
+//       → to_zone → in_zone → waiting_booth → to_booth → in_booth → to_exit → done
+class Dot{
+  constructor(id,role){
+    this.id=id; this.role=role;
+    this.x=W/2; this.y=-8;
+    this.tx=rnd(HALL.x+20,HALL.x+HALL.w-20);
+    this.ty=rnd(HALL.y+14,HALL.y+HALL.h-14);
+    this.state='entering';
+    this.alpha=1; this.dwell=0; this.boothIdx=-1;
+    this.stamped=false;
+  }
+  get col()  { return this.stamped ? RC[this.role] : RC.none; }
+  get dark() { return this.stamped ? RD[this.role] : RD.none; }
+  mv(x,y){this.tx=x;this.ty=y;}
+  here(){return dist(this.x,this.y,this.tx,this.ty)<2.5;}
+  update(dt,spd){
+    const s=80*spd,dx=this.tx-this.x,dy=this.ty-this.y,d=Math.sqrt(dx*dx+dy*dy);
+    if(d>1.5){const st=Math.min(s*dt,d);this.x+=dx/d*st;this.y+=dy/d*st;}
+    else{this.x=this.tx;this.y=this.ty;}
+    if(this.state==='in_booth'){
+      this.dwell+=dt*spd;
+      const thr=this.role!=='participant'?1.2:0.7;
+      if(this.dwell>thr){this.state='to_exit';this.mv(rnd(200,480),EXIT_Y+11);}
+    }
+    if(this.state==='to_exit'&&this.here()){this.state='done';this.mv(W/2,H+20);}
+    if(this.state==='done'){this.alpha=Math.max(0,this.alpha-dt*spd*2);}
+  }
+  draw(){
+    if(this.alpha<=0)return;
+    ctx.globalAlpha=this.alpha;
+    // body
+    ctx.beginPath();ctx.arc(this.x,this.y,5,0,Math.PI*2);
+    ctx.fillStyle=this.col;ctx.fill();
+    ctx.strokeStyle=this.dark;ctx.lineWidth=1.8;ctx.stroke();
+    // stamp dot (inner white if stamped)
+    if(this.stamped){
+      ctx.beginPath();ctx.arc(this.x,this.y,2,0,Math.PI*2);
+      ctx.fillStyle='rgba(255,255,255,0.6)';ctx.fill();
+    }
+    ctx.globalAlpha=1;
+  }
+}
+
+// ── STATIC FIGURES (guards, O and W at booths) ──
+// Activated once roles are assigned
+let figures=[];
+
+function buildFigures(){
+  figures=[];
+  // Guards at checkpoints
+  GPTS.forEach((p,i)=>{
+    figures.push({type:'guard',x:p.x,y:p.y,lbl:'G'+(i+1),pulse:0,on:false});
+  });
+  // Organizer above each booth
+  BX.forEach((bx,i)=>{
+    figures.push({type:'organizer',x:bx+BWID/2,y:BOOTH_Y-14,lbl:'O'+(i+1),pulse:0,on:false,bi:i});
+  });
+  // Witness below each booth
+  BX.forEach((bx,i)=>{
+    figures.push({type:'witness',x:bx+BWID/2,y:BOOTH_Y+BOOTH_H+13,lbl:'W'+(i+1),pulse:0,on:false,bi:i});
+  });
+}
+
+let lines=[];
+function addLine(sx,sy,tx,ty,col){lines.push({sx,sy,tx,ty,col,life:1});}
+
+function drawFigLines(dt){
+  lines=lines.filter(l=>l.life>0);
+  lines.forEach(l=>{
+    l.life-=dt*2.8;
+    ctx.beginPath();ctx.moveTo(l.sx,l.sy);ctx.lineTo(l.tx,l.ty);
+    ctx.strokeStyle=l.col;ctx.globalAlpha=Math.max(0,l.life)*0.45;
+    ctx.lineWidth=1;ctx.setLineDash([3,3]);ctx.stroke();
+    ctx.setLineDash([]);ctx.globalAlpha=1;
+  });
+  figures.forEach(f=>{
+    if(!f.on)return;
+    f.pulse=Math.max(0,f.pulse-dt*1.2);
+    const c=RC[f.type],d=RD[f.type];
+    if(f.pulse>0){
+      ctx.beginPath();ctx.arc(f.x,f.y,10+f.pulse*5,0,Math.PI*2);
+      ctx.strokeStyle=c;ctx.globalAlpha=f.pulse*0.25;ctx.lineWidth=1.5;ctx.stroke();ctx.globalAlpha=1;
+    }
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, 8, 0, Math.PI * 2);
+    ctx.fillStyle   = f.pulse > 0 ? c : c + '40';
+    ctx.fill();
+    ctx.strokeStyle = f.pulse > 0 ? d : d + '55';
+    ctx.lineWidth   = f.pulse > 0 ? 1.2 : 0.6;
+    ctx.stroke();
+    ctx.fillStyle = f.pulse > 0 ? '#ffffff' : 'rgba(255,255,255,0.35)';ctx.font='500 8px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(f.lbl,f.x,f.y);
+  });
+}
+
+function pulseGuards(){figures.filter(f=>f.type==='guard').forEach(f=>{f.pulse=1;f.on=true;});}
+function pulseBooth(bi){figures.filter(f=>f.bi===bi).forEach(f=>{f.pulse=1;f.on=true;});}
+function activateAll(){figures.forEach(f=>f.on=true);}
+
+// ── BG DRAW ──
+function drawBg(phase){
+  ctx.clearRect(0,0,W,H);ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);
+
+  function db(x,y,w,h,fi,st,r){
+    ctx.fillStyle=fi;ctx.strokeStyle=st;ctx.lineWidth=0.8;ctx.setLineDash([4,3]);
+    ctx.beginPath();ctx.roundRect(x,y,w,h,r||6);ctx.fill();ctx.stroke();ctx.setLineDash([]);
+  }
+  function sb(x,y,w,h,fi,st,r){
+    ctx.fillStyle=fi;ctx.strokeStyle=st;ctx.lineWidth=0.8;ctx.setLineDash([]);
+    ctx.beginPath();ctx.roundRect(x,y,w,h,r||6);ctx.fill();ctx.stroke();
+  }
+  function lbl(t,x,y,col,sz,wt){
+    ctx.fillStyle=col||'rgba(100,100,95,0.7)';ctx.font=(wt||'400')+' '+(sz||10)+'px sans-serif';
+    ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(t,x,y);
+  }
+
+  // narrow entry corridor
+  db(W/2-30,0,60,46,'rgba(136,135,128,0.05)','rgba(136,135,128,0.3)');
+  lbl('narrow corridor',W/2,14,'rgba(136,135,128,0.5)',8);
+  lbl('sensor',W/2,30,'rgba(29,158,117,0.9)',9,'500');
+
+  // hall
+  db(HALL.x,HALL.y,HALL.w,HALL.h,'rgba(136,135,128,0.03)','rgba(136,135,128,0.22)');
+  lbl('Waiting hall',HALL.x+52,HALL.y+13,'rgba(136,135,128,0.5)',9);
+
+  // role station (shown from phase >= 2)
+  if(phase>=2){
+    sb(STA.x,STA.y,STA.w,STA.h,'rgba(83,74,183,0.07)','rgba(83,74,183,0.45)');
+    lbl('Role station + stamp',W/2,STA.y+12,'rgba(83,74,183,0.88)',9,'500');
+    lbl('one by one',W/2,STA.y+24,'rgba(83,74,183,0.5)',8);
+  }
+
+  // guard line + label (phase >= 3)
+  if(phase>=3){
+    lbl('guard checkpoints',W/2,STA.y+STA.h+10,'rgba(186,117,23,0.7)',8);
+    [{x1:40,x2:152},{x1:160,x2:400},{x1:518,x2:640}].forEach(g=>{
+      ctx.beginPath();ctx.moveTo(g.x1,STA.y+STA.h+4);ctx.lineTo(g.x2,STA.y+STA.h+4);
+      ctx.strokeStyle='rgba(186,117,23,0.3)';ctx.lineWidth=1;ctx.setLineDash([3,4]);ctx.stroke();ctx.setLineDash([]);
+    });
+  }
+
+  // corridors (phase >= 3)
+  if(phase>=3){
+    [{r:'organizer',l:'Organizer'},{r:'witness',l:'Witness'},{r:'guard',l:'Guard'},{r:'participant',l:'Participant'}].forEach(c=>{
+      const z=CZONES[c.r];
+      sb(z.x,z.y,z.w,z.h,RC[c.r]+'14',RC[c.r]+'88');
+      lbl(c.l,z.x+z.w/2,z.y+14,RD[c.r],9,'500');
+      lbl('corridor',z.x+z.w/2,z.y+27,'rgba(136,135,128,0.5)',8);
+    });
+  }
+
+  // witnessed zone (phase >= 4)
+  if(phase>=4){
+    db(40,234,600,96,'rgba(136,135,128,0.03)','rgba(136,135,128,0.2)');
+    lbl('Witnessed zone stamp colors visible to all',220,247,'rgba(136,135,128,0.5)',9);
+  }
+
+  // booths (phase >= 4)
+  if(phase>=4){
+    BX.forEach((bx,i)=>{
+      sb(bx,BOOTH_Y,BWID,BOOTH_H,'rgba(55,138,221,0.07)','rgba(55,138,221,0.38)',5);
+      lbl('Booth '+(i+1),bx+BWID/2,BOOTH_Y+16,'#185FA5',9,'500');
+      lbl('validate+issue',bx+BWID/2,BOOTH_Y+30,'rgba(136,135,128,0.5)',8);
+      // O tag above
+      sb(bx+BWID/2-13,BOOTH_Y-22,26,12,'rgba(216,90,48,0.12)','rgba(216,90,48,0.42)',4);
+      lbl('O'+(i+1),bx+BWID/2,BOOTH_Y-16,'#993C1D',8,'500');
+      // W tag below
+      sb(bx+BWID/2-13,BOOTH_Y+BOOTH_H+4,26,12,'rgba(29,158,117,0.12)','rgba(29,158,117,0.42)',4);
+      lbl('W'+(i+1),bx+BWID/2,BOOTH_Y+BOOTH_H+10,'#0F6E56',8,'500');
+    });
+    // exit
+    sb(EXIT_Y-206,EXIT_Y,240,22,'rgba(99,153,34,0.1)','rgba(99,153,34,0.5)',5);
+    lbl('Exit  stamp neutralized',W/2-86,EXIT_Y+11,'#3B6D11',9,'500');
+  }
+}
+
+// ── SIMULATION ──
+let dots=[],roleList=[];
+let phase=0;   // 0=idle 1=entry 2=assign 3=corridors 4=booths 5=roles 6=done
+let spawnIdx=0,spawnT=0;
+let assignIdx=0,assignT=0;
+let boothT=0,boothCounts=new Array(NB).fill(0);
+let parsDone=false;
+let running=false,rafId=null,lastT=null,SPD=2;
+let gFlash=0;
+
+function pickBooth(forRole){
+  let mi=999,mx=0;
+  const lim=forRole?NB:NB;
+  for(let i=0;i<lim;i++){if(boothCounts[i]<mi){mi=boothCounts[i];mx=i;}}
+  boothCounts[mx]++;return mx;
+}
+
+function corrTarget(role){
+  const z=CZONES[role];
+  return{x:rnd(z.x+10,z.x+z.w-10),y:rnd(z.y+8,z.y+z.h-8)};
+}
+
+function tick(ts){
+  if(!running)return;
+  if(!lastT)lastT=ts;
+  const dt=Math.min((ts-lastT)/1000,0.05);lastT=ts;
+
+  // ── PHASE 1: entry one by one through narrow corridor ──
+  if(phase===1){
+    spawnT-=dt*SPD;
+    if(spawnT<=0&&spawnIdx<TOTAL){
+      // only spawn next when previous has left the corridor (y > HALL.y)
+      const last=spawnIdx>0?dots[spawnIdx-1]:null;
+      if(!last||last.y>HALL.y-10){
+        const d=new Dot(spawnIdx,roleList[spawnIdx]);
+        dots.push(d);spawnIdx++;
+        spawnT=rnd(0.3,0.55); // spaced entry — one by one feel
+        scr.tot=spawnIdx;updScreen();
+        addLog('Participant #'+String(spawnIdx).padStart(2,'0')+' enters','s');
+      }
+    }
+    // move entering dots toward hall
+    dots.filter(d=>d.state==='entering').forEach(d=>{
+      if(d.here()){d.state='in_hall';}
+    });
+    // all entered → wait a moment then phase 2
+    if(spawnIdx===TOTAL&&dots.every(d=>d.state==='in_hall')){
+      phase=2;
+      setPhase('door sealed — role assignment begins');
+      addLog('Door sealed. '+TOTAL+' participants in hall.','s');
+    }
+  }
+
+  // ── PHASE 2: one by one to role station, get stamped, screen updates ──
+  if(phase===2){
+    assignT-=dt*SPD;
+    if(assignT<=0&&assignIdx<dots.length){
+      const d=dots[assignIdx++];
+      d.state='to_station';
+      d.mv(rnd(STA.x+8,STA.x+STA.w-8),rnd(STA.y+6,STA.y+STA.h-6));
+      assignT=rnd(0.18,0.35);
+    }
+    // arrived at station → stamp + update screen + send to corridor
+    dots.filter(d=>d.state==='to_station'&&d.here()).forEach(d=>{
+      d.state='stamped';d.stamped=true;
+      // update screen counts
+      scr[d.role==='organizer'?'org':d.role==='witness'?'wit':d.role==='guard'?'grd':'par']++;
+      updScreen();
+      addLog('#'+String(d.id).padStart(2,'0')+' stamped → '+d.role.toUpperCase(),d.role[0]==='o'?'o':d.role[0]==='w'?'w':d.role[0]==='g'?'g':'p');
+      // small pause at station then go to corridor
+      setTimeout(()=>{
+        d.state='to_corridor';
+        const t=corrTarget(d.role);d.mv(t.x,t.y);
+      },180/SPD);
+    });
+    if(assignIdx===dots.length&&dots.every(d=>d.state!=='to_station'&&d.state!=='in_hall')){
+      phase=3;
+      setPhase('guards check — everyone takes position');
+      addLog('All roles assigned. Guards activate. Everyone moves to position.','s');
+      pulseGuards();activateAll();
+    }
+  }
+
+  // ── PHASE 3: in corridors, guards flash ──
+  if(phase>=2){
+    gFlash-=dt*SPD;
+    if(gFlash<=0&&phase===3){
+      const passing=dots.filter(d=>d.state==='to_corridor'&&d.y>STA.y+STA.h&&d.y<200);
+      if(passing.length>0){
+        pulseGuards();
+        passing.slice(0,3).forEach(d=>{
+          const g=GPTS.reduce((a,b)=>dist(d.x,d.y,a.x,a.y)<dist(d.x,d.y,b.x,b.y)?a:b);
+          addLine(g.x,g.y,d.x,d.y,RC.guard);
+        });
+        gFlash=rnd(0.2,0.4);
+      }
+    }
+  }
+
+  dots.filter(d=>d.state==='to_corridor'&&d.here()).forEach(d=>{
+    d.state='in_corridor';
+    // move into witnessed zone
+    d.mv(rnd(50,630),rnd(244,320));
+    d.state='to_zone';
+  });
+
+  dots.filter(d=>d.state==='to_zone'&&d.here()).forEach(d=>{
+    d.state='in_zone';
+  });
+
+  // all in zone → phase 4
+  if(phase===3&&dots.length>0&&dots.every(d=>['in_zone','waiting_booth','to_booth','in_booth','to_exit','done'].includes(d.state))){
+    phase=4;
+    setPhase('participants go through booths');
+    addLog('Everyone in position. Participants now process tokens at booths.','s');
+  }
+
+  // ── PHASE 4: participants to booths ──
+  if(phase===4){
+    boothT-=dt*SPD;
+    if(boothT<=0){
+      const ready=dots.filter(d=>d.state==='in_zone'&&d.role==='participant');
+      if(ready.length>0){
+        const d=ready[0];
+        const bi=pickBooth(false);
+        d.boothIdx=bi;d.state='to_booth';
+        d.mv(rnd(BX[bi]+6,BX[bi]+BWID-6),rnd(BOOTH_Y+8,BOOTH_Y+BOOTH_H-8));
+        boothT=rnd(0.05,0.12);
+      } else if(dots.filter(d=>d.role==='participant').every(d=>['to_exit','done'].includes(d.state)||d.alpha<=0)){
+        if(!parsDone){
+          parsDone=true;phase=5;
+          boothCounts=new Array(NB).fill(0);
+          setPhase('role holders now process — enhanced observation');
+          addLog('All participants done. Organizers, witnesses and guards now go through booths.','s');
+          for(let i=0;i<NB;i++)pulseBooth(i);
+        }
+      }
+    }
+  }
+
+  // ── PHASE 5: role holders through booths ──
+  if(phase===5){
+    boothT-=dt*SPD;
+    if(boothT<=0){
+      const ready=dots.filter(d=>d.state==='in_zone'&&d.role!=='participant');
+      if(ready.length>0){
+        const d=ready[0];
+        const bi=pickBooth(true);
+        d.boothIdx=bi;d.state='to_booth';
+        d.mv(rnd(BX[bi]+6,BX[bi]+BWID-6),rnd(BOOTH_Y+8,BOOTH_Y+BOOTH_H-8));
+        boothT=rnd(0.05,0.14);
+      }
+    }
+  }
+
+  // arrive at booth
+  dots.filter(d=>d.state==='to_booth'&&d.here()).forEach(d=>{
+    d.state='in_booth';d.dwell=0;
+    const bi=d.boothIdx;
+    pulseBooth(bi);
+    figures.filter(f=>f.bi===bi).forEach(f=>addLine(f.x,f.y,d.x,d.y,RC[f.type]));
+    if(d.role!=='participant'){
+      figures.filter(f=>f.type==='witness'&&f.bi!==bi).forEach(f=>{
+        if(Math.random()<0.5)addLine(f.x,f.y,d.x,d.y,'rgba(29,158,117,0.35)');
+      });
+    }
+  });
+
+  // update all
+  dots.forEach(d=>d.update(dt,SPD));
+
+  // check complete
+  if(phase===5&&dots.filter(d=>d.alpha>0).length===0){
+    phase=6;running=false;
+    setPhase('event complete — everyone has a new token');
+    addLog('All participants exited with new tokens. Event complete.','s');
+    document.getElementById('bpause').disabled=true;
+    drawBg(4);drawFigLines(0);return;
+  }
+
+  drawBg(phase<2?1:phase<3?2:phase<4?3:4);
+  drawFigLines(dt);
+  dots.forEach(d=>d.draw());
+  rafId=requestAnimationFrame(tick);
+}
+
+function startSim(){
+  roleList=buildRoles();running=true;lastT=null;phase=1;
+  buildFigures();
+  document.getElementById('bplay').disabled=true;
+  document.getElementById('bpause').disabled=false;
+  setPhase('entry — participants arriving one by one');
+  addLog('Entry window open. Participants entering one by one through narrow corridor.','s');
+  rafId=requestAnimationFrame(tick);
+}
+function pauseSim(){
+  running=false;cancelAnimationFrame(rafId);
+  const b=document.getElementById('bpause');b.textContent='Resume';b.onclick=resumeSim;
+}
+function resumeSim(){
+  running=true;lastT=null;rafId=requestAnimationFrame(tick);
+  const b=document.getElementById('bpause');b.textContent='Pause';b.onclick=pauseSim;
+}
+function resetSim(){
+  running=false;cancelAnimationFrame(rafId);
+  dots=[];roleList=[];spawnIdx=0;spawnT=0;assignIdx=0;assignT=0;
+  boothT=0;boothCounts=new Array(NB).fill(0);parsDone=false;
+  phase=0;lines=[];figures=[];lastT=null;gFlash=0;
+  scr.tot=0;scr.org=0;scr.wit=0;scr.grd=0;scr.par=0;updScreen();
+  setPhase('waiting');
+  document.getElementById('bplay').disabled=false;
+  document.getElementById('bpause').disabled=true;
+  document.getElementById('bpause').textContent='Pause';
+  document.getElementById('bpause').onclick=pauseSim;
+  document.getElementById('log').innerHTML='';
+  buildFigures();drawBg(1);
+}
+
+document.getElementById('bplay').onclick=startSim;
+document.getElementById('bpause').onclick=pauseSim;
+document.getElementById('breset').onclick=resetSim;
+document.getElementById('rspd').oninput=function(){SPD=+this.value;document.getElementById('sval').textContent=SPD+'x';};
+
+buildFigures();drawBg(1);updScreen();
+</script>
